@@ -246,6 +246,8 @@ Criadas por `bun run queues:setup` (`ensureQueues`, idempotente) e pelo script d
 
 `PENDING_REFERENCE` guarda `reference_attempts`, `next_reference_check_at` e `reference_deadline_at` (fixado na primeira espera). O worker busca as devidas pelo índice parcial e reavalia cada uma em transação própria: lock da wallet → reler → se já não está pendente ou não está devida, pula (é assim que vários workers coexistem sem duplicar). Backoff exponencial com jitter; limite de tentativas **e** TTL ⇒ `REJECTED / REFERENCE_NOT_FOUND` + evento. Quando a referência chega, a mesma transação antecipa `next_reference_check_at` dos dependentes da mesma wallet, então a resolução não espera o backoff. O estado está todo no banco: reiniciar o serviço só retoma (teste com SIGKILL dos 3 processos).
 
+Todas as decisões temporais da espera usam o **relógio do PostgreSQL** (`clock_timestamp()`, lido uma vez por transação, logo depois do lock da wallet): o agendamento de `next_reference_check_at`, o `reference_deadline_at` (TTL), a seleção das transações devidas e o recheck "ainda está devida?". Instâncias com relógios diferentes não discordam; testes com relógio da aplicação 1h adiantado e 1h atrasado cobrem isso. A aplicação não usa mais o próprio relógio em nenhuma decisão financeira: os timestamps das transações e lançamentos também vêm do banco.
+
 ## 12. Autenticação
 
 Fora do escopo, por decisão (não vale pontos e um sistema caseiro de usuários seria pior que nenhum). Ponto de extensão pronto:
@@ -300,7 +302,8 @@ No `inbox-outbox.test.ts` o broker de saída é um gravador em processo — o al
 - **DEAD na outbox / DLQ** sem ferramenta de redrive.
 - **Autenticação** ausente (ponto de extensão pronto).
 - **Moedas** apenas de 2 casas.
-- **Relógio do worker de referências**: `next_reference_check_at` e o TTL usam o relógio da aplicação (a outbox já usa o do banco). Com relógios sincronizados por NTP o desvio (ms) é irrelevante perto do backoff (s); um nó muito adiantado anteciparia checagens e consumiria o orçamento de tentativas mais cedo.
+- **Relógio da aplicação** ainda é usado em timestamps só informativos (`inbox_messages.*_received_at`, `checkedAt` da reconciliação); nenhuma decisão depende deles.
+- **Definição duplicada das filas** (script de init do LocalStack e `ensureQueues`): `queues:setup` converge os atributos para a configuração atual (`SetQueueAttributes`) em vez de falhar; ainda assim, a fonte da verdade é `ensureQueues`.
 - **SIGTERM** é tratado em `main.ts` e a parada graciosa do consumer é testada chamando `stop()` com mensagem em andamento; o envio do sinal ao processo em si não foi testado (Windows não entrega SIGTERM a processos Bun).
 - **Retenção**: não há limpeza de `outbox_messages` publicadas nem de `inbox_messages` antigas (a trigger permite apagar outbox `PUBLISHED`; falta o job).
 - **Testes SQS** dependem do LocalStack (ou de outro emulador compatível); sem ele, esses casos aparecem como **skip** no relatório do runner (não como pass) — `REQUIRE_SQS=1` transforma o skip em falha.

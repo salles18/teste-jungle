@@ -4,7 +4,7 @@ import { FailureCode, TransactionStatus } from '../../domain/wagering/wager-type
 import { errorFields, type Logger, withLogContext } from '../../observability/logger';
 import type { Metrics } from '../../observability/metrics';
 import { TransientInfrastructureError } from '../errors';
-import type { Clock, UnitOfWork } from '../ports/persistence';
+import type { UnitOfWork } from '../ports/persistence';
 import type { ProcessWagerTransactionUseCase } from './process-wager-transaction';
 
 export interface PendingReferenceRunResult {
@@ -30,7 +30,6 @@ export class ResolvePendingReferencesUseCase {
   constructor(
     private readonly uow: UnitOfWork,
     private readonly wagers: ProcessWagerTransactionUseCase,
-    private readonly clock: Clock,
     private readonly metrics: Metrics,
     private readonly logger: Logger,
   ) {}
@@ -45,7 +44,7 @@ export class ResolvePendingReferencesUseCase {
       failed: 0,
       errors: 0,
     };
-    const due = await this.uow.read((ctx) => ctx.transactions.findDuePendingReferences(this.clock.now(), limit));
+    const due = await this.uow.read((ctx) => ctx.transactions.findDuePendingReferences(limit));
     for (const candidate of due) {
       result.examined++;
       try {
@@ -78,7 +77,8 @@ export class ResolvePendingReferencesUseCase {
         const wallet = await ctx.wallets.findByIdForUpdate(walletId);
         if (!wallet) return null;
         const tx = await ctx.transactions.findById(transactionId);
-        const now = this.clock.now();
+        // "is it due?" on the database clock, the same clock that scheduled it
+        const now = await ctx.databaseNow();
         if (
           !tx ||
           tx.status !== TransactionStatus.PENDING_REFERENCE ||
@@ -86,12 +86,16 @@ export class ResolvePendingReferencesUseCase {
         ) {
           return null;
         }
-        const outcome = await this.wagers.settle(ctx, tx, wallet);
+        const outcome = await this.wagers.settle(ctx, tx, wallet, now);
         await ctx.transactions.save(tx);
-        await this.wagers.persistOutcome(ctx, tx, wallet, outcome, {
-          correlationId: tx.correlationId,
-          causationId: `pending-reference:${tx.id}:${tx.referenceAttempts}`,
-        });
+        await this.wagers.persistOutcome(
+          ctx,
+          tx,
+          wallet,
+          outcome,
+          { correlationId: tx.correlationId, causationId: `pending-reference:${tx.id}:${tx.referenceAttempts}` },
+          now,
+        );
         return tx.status;
       },
       { label: 'wager.resolve_pending_reference' },
@@ -112,7 +116,7 @@ export class ResolvePendingReferencesUseCase {
         const wallet = await ctx.wallets.findByIdForUpdate(walletId);
         const tx = wallet ? await ctx.transactions.findById(transactionId) : null;
         if (!tx || tx.status !== TransactionStatus.PENDING_REFERENCE) return false;
-        const now = this.clock.now();
+        const now = await ctx.databaseNow();
         tx.markFailed({ failureCode: FailureCode.INTERNAL_INVARIANT_VIOLATION, now });
         await ctx.transactions.save(tx);
         await ctx.outbox.enqueue([

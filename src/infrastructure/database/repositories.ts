@@ -142,7 +142,8 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
     return count > 0;
   }
 
-  async findDuePendingReferences(now: Date, limit: number): Promise<DuePendingReference[]> {
+  async findDuePendingReferences(limit: number): Promise<DuePendingReference[]> {
+    const now = await databaseNow(this.em);
     const rows = await this.em.find(
       WagerTransactionRecord,
       { status: TransactionStatus.PENDING_REFERENCE, nextReferenceCheckAt: { $lte: now } },
@@ -285,8 +286,16 @@ export class MikroOrmInboxRepository implements InboxRepository {
   }
 }
 
+/** clock_timestamp(): real current time on the server, even inside a long transaction. */
+export async function databaseNow(em: EntityManager): Promise<Date> {
+  const [row] = await em.execute<{ now: Date | string }[]>('SELECT clock_timestamp() AS now');
+  if (!row) throw new InvariantViolationError('clock_timestamp() returned no row');
+  return row.now instanceof Date ? row.now : new Date(row.now);
+}
+
 export function createTransactionContext(em: EntityManager): TransactionContext {
   return {
+    databaseNow: () => databaseNow(em),
     wallets: new MikroOrmWalletRepository(em),
     transactions: new MikroOrmWagerTransactionRepository(em),
     ledger: new MikroOrmLedgerRepository(em),

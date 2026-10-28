@@ -3,6 +3,7 @@ import {
   GetQueueAttributesCommand,
   GetQueueUrlCommand,
   ListQueuesCommand,
+  SetQueueAttributesCommand,
   SQSClient,
 } from '@aws-sdk/client-sqs';
 import type { AppConfig } from '../../config/app-config';
@@ -44,10 +45,22 @@ export async function resolveQueueUrls(client: SQSClient, config: AppConfig): Pr
  *  - wallet-events.fifo          : outbound integration events from the outbox
  */
 export async function ensureQueues(client: SQSClient, config: AppConfig): Promise<QueueUrls> {
+  // Converges instead of failing: SQS rejects CreateQueue for an existing queue whose
+  // attributes differ (e.g. created by the LocalStack init script, or by an older config).
+  // In that case the queue's mutable attributes are updated to the current configuration.
   const create = async (name: string, attributes: Record<string, string>): Promise<string> => {
-    const out = await client.send(new CreateQueueCommand({ QueueName: name, Attributes: attributes }));
-    if (!out.QueueUrl) throw new Error(`Could not create ${name}`);
-    return out.QueueUrl;
+    try {
+      const out = await client.send(new CreateQueueCommand({ QueueName: name, Attributes: attributes }));
+      if (!out.QueueUrl) throw new Error(`Could not create ${name}`);
+      return out.QueueUrl;
+    } catch (error) {
+      if (!isQueueExistsError(error)) throw error;
+      const existing = await client.send(new GetQueueUrlCommand({ QueueName: name }));
+      if (!existing.QueueUrl) throw error;
+      const { FifoQueue: _immutable, ...mutable } = attributes;
+      await client.send(new SetQueueAttributesCommand({ QueueUrl: existing.QueueUrl, Attributes: mutable }));
+      return existing.QueueUrl;
+    }
   };
   const visibility = String(config.sqs.visibilityTimeoutSeconds);
 
@@ -80,6 +93,16 @@ export async function ensureQueues(client: SQSClient, config: AppConfig): Promis
     VisibilityTimeout: visibility,
   });
   return { wager, dlq, events };
+}
+
+function isQueueExistsError(error: unknown): boolean {
+  const e = error as { name?: string; Code?: string; message?: string };
+  return (
+    e?.name === 'QueueNameExists' ||
+    e?.name === 'QueueAlreadyExists' ||
+    e?.Code === 'QueueAlreadyExists' ||
+    /already exists/i.test(e?.message ?? '')
+  );
 }
 
 /** Cheap readiness probe for the broker. */

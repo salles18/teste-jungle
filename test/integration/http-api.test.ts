@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { INestApplication } from '@nestjs/common';
 import type { Container } from '../../src/bootstrap/container';
 import { createHttpApp } from '../../src/bootstrap/http-app';
+import type { ApiBody } from '../helpers/api-types';
 import { resetDatabase, testContainer } from '../helpers/db';
 import { uniq } from '../helpers/fixtures';
 
@@ -29,7 +30,7 @@ async function call(method: string, path: string, body?: unknown, headers: Recor
     body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
   });
   const text = await res.text();
-  return { status: res.status, headers: res.headers, json: text ? (JSON.parse(text) as Record<string, any>) : null };
+  return { status: res.status, headers: res.headers, json: text ? (JSON.parse(text) as ApiBody) : null };
 }
 
 async function createWallet(initialBalance = '100.00') {
@@ -61,7 +62,7 @@ describe('HTTP contract', () => {
     expect((await call('GET', `/wallets/${w.walletId}`)).json).toMatchObject({ balance: '100.00', version: 1 });
     const dup = await call('POST', '/wallets', { playerId: w.playerId, currency: 'BRL', initialBalance: '1.00' });
     expect(dup.status).toBe(409);
-    expect(dup.json?.error.code).toBe('WALLET_ALREADY_EXISTS');
+    expect(dup.json?.error?.code).toBe('WALLET_ALREADY_EXISTS');
     for (const bad of [
       { initialBalance: '-1.00' },
       { initialBalance: 100 },
@@ -71,7 +72,7 @@ describe('HTTP contract', () => {
     ]) {
       const r = await call('POST', '/wallets', { playerId: uniq('p'), currency: 'BRL', initialBalance: '1.00', ...bad });
       expect(r.status).toBe(400);
-      expect(r.json?.error.code).toBe('VALIDATION_FAILED');
+      expect(r.json?.error?.code).toBe('VALIDATION_FAILED');
     }
     expect((await call('GET', `/wallets/${crypto.randomUUID()}`)).status).toBe(404);
     expect((await call('GET', '/wallets/not-a-uuid')).status).toBe(400);
@@ -94,10 +95,10 @@ describe('HTTP contract', () => {
     });
     const reuse = await call('POST', '/wagering/transactions', { ...body, amount: '1.00' }, k);
     expect(reuse.status).toBe(409);
-    expect(reuse.json?.error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect(reuse.json?.error?.code).toBe('IDEMPOTENCY_KEY_REUSED');
     const ext = await call('POST', '/wagering/transactions', body, key());
     expect(ext.status).toBe(409);
-    expect(ext.json?.error.code).toBe('EXTERNAL_TRANSACTION_CONFLICT');
+    expect(ext.json?.error?.code).toBe('EXTERNAL_TRANSACTION_CONFLICT');
   });
 
   test('wager: 422 business rejection carries the REJECTED transaction', async () => {
@@ -107,7 +108,7 @@ describe('HTTP contract', () => {
     expect(r.json).toMatchObject({ status: 'REJECTED', failureCode: 'INSUFFICIENT_FUNDS', balanceAfter: '10.00' });
     const mismatch = await call('POST', '/wagering/transactions', bet(w, { playerId: 'intruder' }), key());
     expect(mismatch.status).toBe(422);
-    expect(mismatch.json?.error.code).toBe('PLAYER_WALLET_MISMATCH');
+    expect(mismatch.json?.error?.code).toBe('PLAYER_WALLET_MISMATCH');
   });
 
   test('wager: 202 PENDING_REFERENCE for an early REFUND', async () => {
@@ -130,7 +131,7 @@ describe('HTTP contract', () => {
     expect((await call('POST', '/wagering/transactions', bet(w, { amount: 80 }), key())).status).toBe(400);
     const nf = await call('POST', '/wagering/transactions', bet({ walletId: crypto.randomUUID(), playerId: 'x' }), key());
     expect(nf.status).toBe(404);
-    expect(nf.json?.error.code).toBe('WALLET_NOT_FOUND');
+    expect(nf.json?.error?.code).toBe('WALLET_NOT_FOUND');
   });
 
   test('lookup by id and by provider + external id', async () => {
@@ -149,9 +150,9 @@ describe('HTTP contract', () => {
     for (let i = 0; i < 4; i++) await call('POST', '/wagering/transactions', bet(w, { amount: '1.00' }), key());
     const p1 = await call('GET', `/wallets/${w.walletId}/ledger?limit=3`);
     expect(p1.json?.entries).toHaveLength(3);
-    expect(p1.json?.entries[0]).toMatchObject({ direction: 'DEBIT', amount: '1.00', balanceAfter: '96.00', walletVersion: 5 });
+    expect(p1.json?.entries?.[0]).toMatchObject({ direction: 'DEBIT', amount: '1.00', balanceAfter: '96.00', walletVersion: 5 });
     const p2 = await call('GET', `/wallets/${w.walletId}/ledger?limit=3&cursor=${p1.json?.nextCursor}`);
-    expect(p2.json?.entries.map((e: { walletVersion: number }) => e.walletVersion)).toEqual([2, 1]);
+    expect(p2.json?.entries?.map((e: { walletVersion: number }) => e.walletVersion)).toEqual([2, 1]);
     expect(p2.json?.nextCursor).toBeNull();
     expect((await call('GET', `/wallets/${w.walletId}/ledger?limit=0`)).status).toBe(400);
     expect((await call('GET', `/wallets/${w.walletId}/ledger?cursor=bogus`)).status).toBe(400);
@@ -164,7 +165,7 @@ describe('HTTP contract', () => {
     expect((await call('GET', '/health/live')).json).toEqual({ status: 'ok' });
     const ready = await call('GET', '/health/ready');
     expect(ready.status).toBe(200);
-    expect(ready.json?.checks.postgres).toBe('up');
+    expect(ready.json?.checks?.postgres).toBe('up');
     const r = await call('GET', '/health/live', undefined, { 'X-Correlation-Id': 'abc-123' });
     expect(r.headers.get('x-correlation-id')).toBe('abc-123');
     const metrics = await fetch(`${base}/metrics`).then((x) => x.text());

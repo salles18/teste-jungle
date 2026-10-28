@@ -54,7 +54,9 @@ Dados de demonstração determinísticos (idempotente): `bun run seed`.
 | `bun run test:unit` | testes de unidade (sem dependências externas) |
 | `bun run test:integration` | integração com PostgreSQL real (+ SQS real se LocalStack estiver no ar) |
 | `bun run test:concurrency` | concorrência real, inclusive 3 processos independentes |
-| `bun run test` | as três suítes acima |
+| `bun run test` | as três suítes acima (sem SQS, os cenários de SQS aparecem como `skip`) |
+| `bun run test:required` | as três suítes com `REQUIRE_SQS=1`: **falha** se o SQS não estiver acessível |
+| `bun run validate` | validação completa da entrega; falha (exit ≠ 0) se faltar Docker, PostgreSQL ou LocalStack (ver abaixo) |
 | `bun run typecheck` / `lint` / `format` | `tsc --noEmit`, Biome |
 
 Três instâncias da aplicação em containers (portas 3001-3003): `docker compose --profile app up -d --build`.
@@ -187,10 +189,48 @@ bun run infra:up
 bun run test:unit
 bun run test:integration     # PostgreSQL real; SQS real se o LocalStack estiver no ar
 bun run test:concurrency     # paralelismo real + 3 processos independentes
-REQUIRE_SQS=1 bun run test              # falha (em vez de marcar skip) se o SQS estiver indisponível
+bun run test:required                   # = REQUIRE_SQS=1 bun run test: falha (em vez de marcar skip) se o SQS estiver indisponível
 ```
 
 Sem SQS disponível, os cenários de SQS aparecem como `skip` no relatório. O que cada suíte cobre está em [ARCHITECTURE.md §14](ARCHITECTURE.md#14-estratégia-de-testes). Os testes de integração recriam o schema de `TEST_DATABASE_URL` (`DROP SCHEMA public CASCADE` + migrations) a cada arquivo — nunca aponte essa variável para um banco com dados.
+
+## Validação completa da entrega
+
+Numa máquina com Docker, a partir de um clone limpo:
+
+```bash
+git clone https://github.com/salles18/teste-jungle.git && cd teste-jungle
+cp .env.example .env
+bun install --frozen-lockfile
+bun run validate
+```
+
+`bun run validate` ([scripts/validate-delivery.ts](scripts/validate-delivery.ts)) executa, nesta ordem, e para no primeiro erro com exit code ≠ 0:
+
+1. Docker e Compose v2 presentes;
+2. `docker compose up -d --wait postgres localstack` (espera os healthchecks);
+3. o endpoint SQS **é o LocalStack** (`/_localstack/health`, com `sqs` ativo) — outros emuladores são recusados;
+4. conexão com `jungle_wallet` e `jungle_wallet_test`;
+5. migrations num banco vazio temporário: up, rollback total, up;
+6. `db:migrate` e `queues:setup`;
+7. `typecheck`, `lint`, `test:unit`, `test:integration` e `test:concurrency` com `REQUIRE_SQS=1`;
+8. e2e contra o app real com todos os papéis: 100.00 × 2 apostas de 80.00 (201 + 422, saldo 20.00), 50 envios da mesma operação (1 criada + 49 replays), BET entregue por `wager-transactions.fifo`, evento da outbox chegando em `wallet-events.fifo` e reconciliação consistente.
+
+Ao final imprime um resumo por etapa e `RESULTADO: VALIDADO` ou `RESULTADO: FALHOU em "<etapa>"`. Com a infraestrutura já de pé: `SKIP_DOCKER=1 bun run validate`.
+
+Passo a passo equivalente, manual:
+
+```bash
+docker compose up -d --wait postgres localstack
+curl -s localhost:4566/_localstack/health      # "sqs": "available" ou "running"
+bun run db:migrate
+bun run queues:setup
+bun run typecheck && bun run lint
+bun run test:required
+bun run start &                                 # em outro terminal
+curl -s localhost:3000/health/ready             # {"status":"ok","checks":{"postgres":"up","sqs":"up"}}
+bun run demo:concurrency
+```
 
 ## Limitações conhecidas
 

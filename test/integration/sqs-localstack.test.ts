@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import {
   ChangeMessageVisibilityCommand,
+  CreateQueueCommand,
   DeleteMessageCommand,
   GetQueueAttributesCommand,
   ReceiveMessageCommand,
@@ -9,6 +10,8 @@ import {
 } from '@aws-sdk/client-sqs';
 import type { EntityManager } from '@mikro-orm/postgresql';
 import type { Container } from '../../src/bootstrap/container';
+import type { EventEnvelope } from '../../src/domain/events/integration-event';
+import type { WalletBalanceChangedData } from '../../src/domain/events/wallet-events';
 import { RetryPolicy } from '../../src/domain/shared/retry-policy';
 import { OutboxPublisher } from '../../src/infrastructure/outbox/outbox-publisher';
 import { createSqsClient, ensureQueues, pingSqs, type QueueUrls } from '../../src/infrastructure/sqs/sqs';
@@ -119,6 +122,29 @@ describe('SQS (LocalStack)', () => {
     expect(JSON.parse(attrs.Attributes?.RedrivePolicy ?? '{}').deadLetterTargetArn).toContain(env.SQS_WAGER_DLQ);
   });
 
+  sqsTest('ensureQueues converges an existing queue created with different attributes (no setup failure)', async () => {
+    const name = `drift-${run}`;
+    const cfg = {
+      ...c.config,
+      sqs: {
+        ...c.config.sqs,
+        wagerQueueName: `${name}.fifo`,
+        wagerDlqName: `${name}-dlq.fifo`,
+        eventsQueueName: `${name}-ev.fifo`,
+      },
+    };
+    // someone (init script / older config) created the queue with another visibility timeout
+    await sqs.send(
+      new CreateQueueCommand({ QueueName: cfg.sqs.wagerQueueName, Attributes: { FifoQueue: 'true', VisibilityTimeout: '99' } }),
+    );
+    const converged = await ensureQueues(sqs, cfg);
+    const attrs = await sqs.send(new GetQueueAttributesCommand({ QueueUrl: converged.wager, AttributeNames: ['All'] }));
+    expect(attrs.Attributes?.VisibilityTimeout).toBe(String(cfg.sqs.visibilityTimeoutSeconds));
+    expect(JSON.parse(attrs.Attributes?.RedrivePolicy ?? '{}').deadLetterTargetArn).toContain(cfg.sqs.wagerDlqName);
+    // and running it again is a no-op
+    expect((await ensureQueues(sqs, cfg)).wager).toBe(converged.wager);
+  });
+
   sqsTest('message -> inbox + financial effect -> ack only after commit', async () => {
     const w = await openWallet(c, '100.00');
     const messageId = await send(w.id, wager(w, 'BET', '80.00'));
@@ -210,7 +236,7 @@ describe('SQS (LocalStack)', () => {
       /* drain */
     }
     // other wallets' events are in the queue too; read until this wallet's group shows up
-    const mine: { group: string | undefined; env: Record<string, any> }[] = [];
+    const mine: { group: string | undefined; env: EventEnvelope<WalletBalanceChangedData> }[] = [];
     for (let i = 0; i < 20 && mine.length === 0; i++) {
       const out = await sqs.send(
         new ReceiveMessageCommand({

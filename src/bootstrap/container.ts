@@ -55,7 +55,7 @@ export async function createContainer(config: AppConfig, overrides: ContainerOve
   );
 
   const pr = config.pendingReference;
-  const wagers = new ProcessWagerTransactionUseCase(uow, clock, metrics, logger, {
+  const wagers = new ProcessWagerTransactionUseCase(uow, metrics, logger, {
     supportedCurrencies: config.supportedCurrencies,
     waitPolicy: {
       retry: new RetryPolicy({ maxAttempts: pr.maxAttempts, baseDelayMs: pr.baseDelayMs, maxDelayMs: pr.maxDelayMs }),
@@ -72,7 +72,7 @@ export async function createContainer(config: AppConfig, overrides: ContainerOve
     uow,
     wagers,
     wallets: new WalletUseCases(uow, clock, metrics, logger, config.supportedCurrencies),
-    pendingReferences: new ResolvePendingReferencesUseCase(uow, wagers, clock, metrics, logger),
+    pendingReferences: new ResolvePendingReferencesUseCase(uow, wagers, metrics, logger),
     outboxStore: new OutboxStore(orm, clock),
     close: () => orm.close(true),
   };

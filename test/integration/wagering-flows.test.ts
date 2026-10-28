@@ -359,6 +359,80 @@ describe('out-of-order references (PENDING_REFERENCE + worker)', () => {
   });
 });
 
+describe('pending references use the PostgreSQL clock (app servers with skewed clocks)', () => {
+  const ahead = { now: () => new Date(Date.now() + 3_600_000) };
+  const behind = { now: () => new Date(Date.now() - 3_600_000) };
+
+  test('schedule and deadline are relative to the database clock, not the app clock', async () => {
+    const node = await testContainer(
+      { PENDING_REFERENCE_BASE_DELAY_MS: '60000', PENDING_REFERENCE_MAX_DELAY_MS: '60000', PENDING_REFERENCE_TTL_MS: '600000' },
+      { clock: ahead },
+    );
+    try {
+      const w = await openWallet(node, '100.00');
+      const refund = await node.wagers.execute(
+        wager(w, 'REFUND', '1.00', { referenceExternalTransactionId: uniq('later') }),
+        meta(),
+      );
+      const [row] = await sql<{ next_in: number; deadline_in: number }>(
+        node,
+        `SELECT EXTRACT(EPOCH FROM next_reference_check_at - now())::float8 AS next_in,
+                EXTRACT(EPOCH FROM reference_deadline_at - now())::float8 AS deadline_in
+           FROM wager_transactions WHERE id = ?`,
+        [refund.transaction.id],
+      );
+      // 60s base delay with 50% jitter => 30..60s; TTL 600s. An app clock 1h ahead would add 3600s.
+      expect(row?.next_in).toBeGreaterThan(25);
+      expect(row?.next_in).toBeLessThan(61);
+      expect(row?.deadline_in).toBeGreaterThan(590);
+      expect(row?.deadline_in).toBeLessThan(601);
+    } finally {
+      await node.close();
+    }
+  });
+
+  test('a worker whose clock is 1h ahead does not treat a not-yet-due row as due (no budget burnt early)', async () => {
+    const scheduler = await testContainer({ PENDING_REFERENCE_BASE_DELAY_MS: '60000', PENDING_REFERENCE_MAX_DELAY_MS: '60000' });
+    const fastNode = await testContainer({}, { clock: ahead });
+    try {
+      const w = await openWallet(scheduler, '100.00');
+      const refund = await scheduler.wagers.execute(
+        wager(w, 'REFUND', '1.00', { referenceExternalTransactionId: uniq('later') }),
+        meta(),
+      );
+      const run = await fastNode.pendingReferences.runOnce(1000);
+      expect(run.examined).toBe(0);
+      const after = await scheduler.wagers.getById(refund.transaction.id);
+      expect(after.referenceAttempts).toBe(1);
+      expect(after.status).toBe('PENDING_REFERENCE');
+    } finally {
+      await fastNode.close();
+      await scheduler.close();
+    }
+  });
+
+  test('a worker whose clock is 1h behind still resolves rows that another node scheduled', async () => {
+    const scheduler = await testContainer();
+    const slowNode = await testContainer({}, { clock: behind });
+    try {
+      const w = await openWallet(scheduler, '100.00');
+      const betExt = uniq('bet-slow');
+      const refund = await scheduler.wagers.execute(
+        wager(w, 'REFUND', '5.00', { referenceExternalTransactionId: betExt }),
+        meta(),
+      );
+      await scheduler.wagers.execute(wager(w, 'BET', '5.00', { externalTransactionId: betExt }), meta());
+      const run = await slowNode.pendingReferences.runOnce(1000);
+      expect(run.processed).toBeGreaterThanOrEqual(1);
+      expect((await scheduler.wagers.getById(refund.transaction.id)).status).toBe('PROCESSED');
+      expectConsistent(await auditWallet(scheduler, w.id));
+    } finally {
+      await slowNode.close();
+      await scheduler.close();
+    }
+  });
+});
+
 describe('pending worker: permanent errors', () => {
   test('a non-transient error while re-evaluating ends the transaction FAILED instead of looping forever', async () => {
     const isolated = await testContainer();

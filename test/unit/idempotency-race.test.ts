@@ -58,7 +58,7 @@ function racingUseCase(row: WagerTransaction) {
       throw new Error('must not open a write transaction for a replay');
     },
   };
-  const useCase = new ProcessWagerTransactionUseCase(uow, { now: () => new Date() }, new Metrics(), createLogger('silent'), {
+  const useCase = new ProcessWagerTransactionUseCase(uow, new Metrics(), createLogger('silent'), {
     supportedCurrencies: ['BRL'],
     waitPolicy: { retry: new RetryPolicy({ maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0 }), ttlMs: 1000 },
   });

@@ -72,7 +72,7 @@ export class WalletUseCases {
           const existing = await ctx.wallets.findByPlayerAndCurrency(command.playerId, command.currency);
           if (existing) throw new WalletAlreadyExistsError(command.playerId, command.currency, existing.id);
 
-          const now = this.clock.now();
+          const now = await ctx.databaseNow();
           const walletId = newId();
           const openingTransactionId = newId();
           let opened: ReturnType<typeof Wallet.open>;

@@ -29,7 +29,8 @@ export interface WagerTransactionRepository {
   findByIdempotencyKey(providerId: string, idempotencyKey: string): Promise<WagerTransaction | null>;
   findByExternalId(providerId: string, externalTransactionId: string): Promise<WagerTransaction | null>;
   hasProcessedReversal(referenceTransactionId: string): Promise<boolean>;
-  findDuePendingReferences(now: Date, limit: number): Promise<DuePendingReference[]>;
+  /** PENDING_REFERENCE rows whose next check is due according to the database clock. */
+  findDuePendingReferences(limit: number): Promise<DuePendingReference[]>;
   /** Pulls forward the next check of PENDING_REFERENCE rows of this wallet that wait for `externalTransactionId`. */
   wakePendingDependents(input: {
     providerId: string;
@@ -72,6 +73,12 @@ export interface InboxRepository {
 
 /** Repositories bound to one database transaction (one forked EntityManager). */
 export interface TransactionContext {
+  /**
+   * Current time on the PostgreSQL clock (clock_timestamp()). Every time-based
+   * decision that other instances must agree on (reference backoff, TTL, "is it due?")
+   * uses this, so application servers with skewed clocks cannot disagree.
+   */
+  databaseNow(): Promise<Date>;
   wallets: WalletRepository;
   transactions: WagerTransactionRepository;
   ledger: LedgerRepository;

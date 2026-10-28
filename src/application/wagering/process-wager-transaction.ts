@@ -21,7 +21,7 @@ import {
   TransactionNotFoundError,
   WalletNotFoundError,
 } from '../errors';
-import type { Clock, TransactionContext, UnitOfWork } from '../ports/persistence';
+import type { TransactionContext, UnitOfWork } from '../ports/persistence';
 import { wagerPayloadHash } from './payload-hash';
 
 /** Business fields of a provider instruction. Identical for HTTP and SQS. */
@@ -83,7 +83,6 @@ export interface ProcessWagerOptions {
 export class ProcessWagerTransactionUseCase {
   constructor(
     private readonly uow: UnitOfWork,
-    private readonly clock: Clock,
     private readonly metrics: Metrics,
     private readonly logger: Logger,
     private readonly options: ProcessWagerOptions,
@@ -161,6 +160,8 @@ export class ProcessWagerTransactionUseCase {
 
     const wallet = await ctx.wallets.findByIdForUpdate(command.walletId);
     if (!wallet) throw new WalletNotFoundError(command.walletId);
+    // read after the lock wait, so the instant reflects when the decision is made
+    const now = await ctx.databaseNow();
 
     const existing = await this.findExisting(ctx, prepared);
     if (existing) return this.replay(existing, prepared);
@@ -192,7 +193,7 @@ export class ProcessWagerTransactionUseCase {
         money,
         referenceExternalTransactionId: command.referenceExternalTransactionId,
         correlationId: meta.correlationId,
-        now: this.clock.now(),
+        now,
       });
     } catch (error) {
       if (error instanceof DomainError) throw new CommandValidationError(error.message, [error.message]);
@@ -200,9 +201,9 @@ export class ProcessWagerTransactionUseCase {
     }
     enrichLogContext({ transactionId: tx.id });
 
-    const outcome = await this.settle(ctx, tx, wallet);
+    const outcome = await this.settle(ctx, tx, wallet, now);
     await ctx.transactions.insert(tx);
-    await this.persistOutcome(ctx, tx, wallet, outcome, meta);
+    await this.persistOutcome(ctx, tx, wallet, outcome, meta, now);
 
     this.logger.info(
       { kind: tx.kind, status: tx.status, failureCode: tx.failureCode, channel: meta.channel },
@@ -213,9 +214,9 @@ export class ProcessWagerTransactionUseCase {
 
   /**
    * Applies the rules to a transaction whose wallet is locked by the caller.
-   * Shared with the pending-reference worker.
+   * Shared with the pending-reference worker. `now` must come from ctx.databaseNow().
    */
-  async settle(ctx: TransactionContext, tx: WagerTransaction, wallet: Wallet): Promise<SettlementOutcome> {
+  async settle(ctx: TransactionContext, tx: WagerTransaction, wallet: Wallet, now: Date): Promise<SettlementOutcome> {
     const reference = tx.referenceExternalTransactionId
       ? await ctx.transactions.findByExternalId(tx.providerId, tx.referenceExternalTransactionId)
       : null;
@@ -227,7 +228,7 @@ export class ProcessWagerTransactionUseCase {
       reference,
       referenceAlreadyReversed,
       waitPolicy: this.options.waitPolicy,
-      now: this.clock.now(),
+      now,
     });
   }
 
@@ -242,8 +243,8 @@ export class ProcessWagerTransactionUseCase {
     wallet: Wallet,
     outcome: SettlementOutcome,
     meta: Pick<CommandMetadata, 'correlationId' | 'causationId'>,
+    now: Date,
   ): Promise<void> {
-    const now = this.clock.now();
     const eventMeta: EventMetadata = { correlationId: meta.correlationId, causationId: meta.causationId, occurredAt: now };
     const events: OutboxMessage[] = [];
 

@@ -3,6 +3,7 @@ import { SendMessageCommand, type SQSClient } from '@aws-sdk/client-sqs';
 import type { Subprocess } from 'bun';
 import type { Container } from '../../src/bootstrap/container';
 import { createSqsClient, ensureQueues, pingSqs } from '../../src/infrastructure/sqs/sqs';
+import type { ApiBody } from '../helpers/api-types';
 import { auditWallet, expectConsistent, resetDatabase, sql, TEST_DATABASE_URL, testContainer } from '../helpers/db';
 import { uniq } from '../helpers/fixtures';
 import { sqsReachable } from '../helpers/sqs';
@@ -74,7 +75,7 @@ async function post(url: string, path: string, body: unknown, headers: Record<st
     headers: { 'content-type': 'application/json', ...headers },
     body: JSON.stringify(body),
   });
-  return { status: res.status, json: (await res.json()) as Record<string, any> };
+  return { status: res.status, json: (await res.json()) as ApiBody };
 }
 
 function wagerBody(w: { walletId: string; playerId: string }, patch: Record<string, unknown> = {}) {
